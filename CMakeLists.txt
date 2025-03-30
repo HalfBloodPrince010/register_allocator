@@ -7,30 +7,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # LLVM
-execute_process(COMMAND llvm-config --cxxflags
-                OUTPUT_VARIABLE LLVM_CXXFLAGS
-                OUTPUT_STRIP_TRAILING_WHITESPACE)
+# Load LLVMConfig.cmake. If this fails, consider setting `LLVM_DIR` to point
+# to your LLVM installation's `lib/cmake/llvm` directory.
+# LLVM_DIR=/usr/local/opt/llvm@18/lib/cmake/llvm/
+find_package(LLVM REQUIRED CONFIG)
 
-execute_process(COMMAND llvm-config --ldflags
-                OUTPUT_VARIABLE LLVM_LDFLAGS
-                OUTPUT_STRIP_TRAILING_WHITESPACE)
+# Include the part of LLVM's CMake libraries that defines
+# `add_llvm_pass_plugin`.
+include(AddLLVM)
 
-execute_process(COMMAND llvm-config --libs all
-                OUTPUT_VARIABLE LLVM_LIBS
-                OUTPUT_STRIP_TRAILING_WHITESPACE)
-    
-execute_process(COMMAND llvm-config --system-libs
-                OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
-                OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LLVM_CXXFLAGS} -Wall -Werror")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LLVM_LDFLAGS}")
-add_compile_options(-Wno-unused-private-field)
-
+# Use LLVM's preprocessor definitions, include directories, and library search
+# paths.
+add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS})
+link_directories(${LLVM_LIBRARY_DIRS})
 
 add_subdirectory(lib)
-
-add_executable(${PROJECT_NAME} lib/RegisterAllocatorMinimal.cpp)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE ${LLVM_LIBS} ${LLVM_SYSTEM_LIBS})
