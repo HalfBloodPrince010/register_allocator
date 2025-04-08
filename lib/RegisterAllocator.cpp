@@ -18,6 +18,12 @@
 
 using namespace llvm;
 
+namespace llvm {
+
+void initializeRegisterAllocatorMinimalPass(PassRegistry &Registry);
+
+}
+
 namespace {
 
 class RegisterAllocatorMinimal: public MachineFunctionPass {
@@ -119,17 +125,17 @@ public:
   AU.addRequired<PassName>();                                                  \
   AU.addPreserved<PassName>()
 
-        REQUIRE_AND_PRESERVE_PASS(SlotIndexes);
+        REQUIRE_AND_PRESERVE_PASS(SlotIndexesWrapperPass);
         REQUIRE_AND_PRESERVE_PASS(VirtRegMap);
-        REQUIRE_AND_PRESERVE_PASS(LiveIntervals);
+        REQUIRE_AND_PRESERVE_PASS(LiveIntervalsWrapperPass);
         REQUIRE_AND_PRESERVE_PASS(LiveRegMatrix);
 
         // implicitly requested by the spiller
         REQUIRE_AND_PRESERVE_PASS(LiveStacks);
         REQUIRE_AND_PRESERVE_PASS(AAResultsWrapperPass);
-        REQUIRE_AND_PRESERVE_PASS(MachineDominatorTree);
-        REQUIRE_AND_PRESERVE_PASS(MachineLoopInfo);
-        REQUIRE_AND_PRESERVE_PASS(MachineBlockFrequencyInfo);
+        REQUIRE_AND_PRESERVE_PASS(MachineDominatorTreeWrapperPass);
+        REQUIRE_AND_PRESERVE_PASS(MachineLoopInfoWrapperPass);
+        REQUIRE_AND_PRESERVE_PASS(MachineBlockFrequencyInfoWrapperPass);
     }
 
     /*
@@ -158,25 +164,27 @@ public:
         outs() << "************************************************\n"
                << "* Machine Function\n"
                << "************************************************\n";
-        
+
         // 0. Get all the Analysis from the Passes
 
         // Get Analysis from SlotIndex Pass
-        SI = &getAnalysis<SlotIndexes>();
+        SI = &getAnalysis<SlotIndexesWrapperPass>().getSI();
 
         for (const MachineBasicBlock &MBB: MF) {
             MBB.print(outs(), SI);
             outs() << "\n";
         }
         outs() << "\n\n";
+
         /* 
         Get Analysis from the 
             VirtRegMap 
             LiveIntervals and,
             LiveRegMatrix passes.
+
+            The *VirtRegMap* maps virtual registers to physical registers and
+            virtual registers to stack slots.
         */
-        // The *VirtRegMap* maps virtual registers to physical registers and
-        // virtual registers to stack slots.
         VRM = &getAnalysis<VirtRegMap>();
         TRI = &VRM->getTargetRegInfo();
         MRI = &VRM->getRegInfo();
@@ -189,7 +197,7 @@ public:
         physical register unaccessible during register allocation.
         */
         MRI->freezeReservedRegs();
-        LIS = &getAnalysis<LiveIntervals>();
+        LIS = &getAnalysis<LiveIntervalsWrapperPass>().getLIS();
         LRM = &getAnalysis<LiveRegMatrix>();
     
         // The *RegisterClassInfo* provides dynamic information about target
@@ -213,17 +221,14 @@ public:
             enqueue(&LIS->getInterval(Reg));
         }
 
-
         return false;
     }
-
-
 };
 
 char RegisterAllocatorMinimal::ID = 0;
 
 /* 
-Register a new Register Allocator.
+Register a new Register Allocator in the LLVM Backend.
 
 LLVM Backend Passes still rely on the Legacy Pass Managers.
 
@@ -238,8 +243,31 @@ Parameters
     Lambda Function ([]() -> FunctionPass *):
         A factory function that creates an instance of the custom register allocator (RegisterAllocatorMinimal).
         The lambda returns a pointer to a FunctionPass, which is the base class for LLVM's backend passes.
+    
+llc -regalloc=register-allocator-minimal input.bc
+
+Note: This just register the customer register allocator
 */
 static RegisterRegAlloc X("register-allocator-minimal", "Minimal Register Allocator", 
 []() -> FunctionPass* {return new RegisterAllocatorMinimal();});
 }
+
+/*
+Ensures that all required analyses (e.g., SlotIndexes, LiveIntervals) are initialized before your allocator runs.
+*/
+
+INITIALIZE_PASS_BEGIN(RegisterAllocatorMinimal, "regallominimal", "Minimal Register Allocator",
+                      false, false)
+INITIALIZE_PASS_DEPENDENCY(SlotIndexesWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(VirtRegMap)
+INITIALIZE_PASS_DEPENDENCY(LiveIntervalsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(LiveRegMatrix)
+INITIALIZE_PASS_DEPENDENCY(LiveStacks);
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass);
+INITIALIZE_PASS_DEPENDENCY(MachineDominatorTreeWrapperPass);
+INITIALIZE_PASS_DEPENDENCY(MachineLoopInfoWrapperPass);
+INITIALIZE_PASS_DEPENDENCY(MachineBlockFrequencyInfoWrapperPass);
+
+INITIALIZE_PASS_END(RegisterAllocatorMinimal, "regallominimal", "Minimal Register Allocator",
+                    false, false)
 
