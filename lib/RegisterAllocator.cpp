@@ -26,7 +26,7 @@ void initializeRegisterAllocatorMinimalPass(PassRegistry &Registry);
 
 namespace {
 
-class RegisterAllocatorMinimal: public MachineFunctionPass {
+class RegisterAllocatorMinimal: public MachineFunctionPass, LiveRangeEdit::Delegate {
 private:
     MachineFunction *MF;
     /*
@@ -103,6 +103,8 @@ private:
 
     // Spiller
     std::unique_ptr<Spiller> SpillerInst;
+    // Track machine instructions that define original registers but become dead after rematerialization.
+    SmallPtrSet<MachineInstr *, 32> DeadRemats;
 
 
 public:
@@ -146,6 +148,53 @@ public:
             MachineFunctionProperties::Property::NoPHIs
         );
     }
+
+    /*
+    Get the Register Units for the Physical Register. Collect the Interfering
+    VirtRegs. 
+    Only if all the Reg Units are spillable, and their spill cost is less than the
+    current LI for which we are trying to assign PhysReg, then we spill those
+    virtRegs(IntfLI)
+    */
+    bool spillInterferences(LiveInterval *const LI, MCRegister PhysReg, SmallVectorImpl<Register> *const SplitVirtRegs) {
+        SmallVector<const LiveInterval *, 8> IntfLIs;
+
+        for(MCRegUnitIterator RegUnit(PhysReg, TRI); RegUnit.isValid(); RegUnit++) {
+            LiveIntervalUnion::Query &Q = LRM->query(*LI, *RegUnit);
+            for (const LiveInterval *const IntfLI: Q.interferingVRegs()) {
+                if(!IntfLI->isSpillable() || IntfLI->weight() > LI->weight()) {
+                    return false;
+                }
+
+                IntfLIs.push_back(IntfLI);
+            }
+        }
+
+        // Spill each interfering vreg allocated to PhysRegs.
+        for(unsigned IntfIdx = 0; IntfIdx < IntfLIs.size(); IntfIdx++) {
+            const LiveInterval *const LIToSpill = IntfLIs[IntfIdx];
+
+            /*
+            Avoid duplicates
+
+            This check ensures that we only process virtual registers (LIToSpill) that are 
+            currently assigned to physical registers by the VirtRegMap (VRM)
+            */
+            if(!VRM->hasPhys(LIToSpill->reg())) {
+                continue;
+            }
+
+            LRM->unassign(*LIToSpill);
+            LiveRangeEdit LRE(LIToSpill, *SplitVirtRegs, *MF, *LIS, VRM, this,
+                        &DeadRemats);
+             SpillerInst->spill(LRE);
+        }
+
+        return true;
+    }
+
+
+
 
     /*
     Either assign a Physical Register to the Live Interval or split into mutliple Live Interval.
@@ -215,11 +264,19 @@ public:
 
         // 2.3. Attempt to spill another interfering reg with less spill weight.
         for(MCRegister PhysReg: PhysRegSpillCandidates) {
-            // TODO: Spill Virtual Register
-            outs() << TRI->getRegAsmName(PhysReg);
+
         }
 
-        // TODO: 2.4 Notify the Caller that the virtual register has been spilled.
+        /*
+
+        If every candidate physical register in PhysRegSpillCandidates cannot be spilled (due to higher spill weight or being unspillable), 
+        spillInterferences will return false for all candidates.
+
+        2.4 Then we just the current Live Interval and notify the Caller that the passed virtual register 
+        has been spilled.
+        */
+        LiveRangeEdit LRE(LI, *SplitVirtRegs, *MF, *LIS, VRM, this, &DeadRemats);
+        SpillerInst->spill(LRE);
 
         return 0;
     }
@@ -227,6 +284,12 @@ public:
     /*
     Specifies which properties should be cleared after the pass has executed 
     because they are no longer valid.
+
+    LiveRangeEdit facilitates operations like splitting a virtual register into smaller 
+    pieces or spilling it to memory.
+
+    It splits/spills the register, and adds the new virtual registers to passed vector.
+
     */
     MachineFunctionProperties getClearedProperties() const override {
         // No longer in SSA format because we removed the PHI Nodes, and we will be allocating actual registers.
@@ -321,9 +384,28 @@ public:
             if(PhysReg) {
                 LRM->assign(*LI, PhysReg);
             }
+
+            // Enqueue the splitted live ranges if any 
+            for(Register Reg: SplitVirtualRegister) {
+                LiveInterval *LI = &LIS->getInterval(Reg);
+                if (MRI->reg_nodbg_empty(LI->reg())) {
+                    LIS->removeInterval(LI->reg());
+                    continue;
+                }
+                
+                enqueue(LI);
+            }
         }
 
-        return false;
+        /* 
+        Remove the Dead Machine Instructions
+        */
+        for(MachineInstr *const DeadInst: DeadRemats) {
+            LIS->RemoveMachineInstrFromMaps(*DeadInst);
+            DeadInst->removeFromParent();
+        }
+        DeadRemats.clear();
+        return true;
     }
 };
 
